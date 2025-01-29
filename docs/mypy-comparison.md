@@ -9,7 +9,9 @@ Mypy is the “OG” in the world of Python type checkers. It was started by Juk
 
 Mypy served as a reference implementation of [PEP 484](https://www.python.org/dev/peps/pep-0484/), which defines standard behaviors for Python static typing. Although PEP 484 spells out many type checking behaviors, it intentionally leaves many other behaviors undefined. This approach has allowed different type checkers to innovate and differentiate.
 
-Pyright generally adheres to the type checking behaviors spelled out in PEP 484 and follow-on typing PEPs (526, 544, 586, 589, etc.). For behaviors that are not explicitly spelled out in these standards, pyright generally tries to adhere to mypy’s behavior unless there is a compelling justification for deviating. This document discusses these differences and provides the reasoning behind each design choice.
+Pyright generally adheres to the official [Python typing specification](https://typing.readthedocs.io/en/latest/spec/index.html), which incorporates and builds upon PEP 484 and other typing-related PEPs. The typing spec is accompanied by an ever-expanding suite of conformance tests. For the latest conformance test results for pyright, mypy and other type checkers, refer to [this page](https://htmlpreview.github.io/?https://github.com/python/typing/blob/main/conformance/results/results.html).
+
+For behaviors that are not explicitly spelled out in the typing spec, pyright generally tries to adhere to mypy’s behavior unless there is a compelling justification for deviating. This document discusses these differences and provides the reasoning behind each design choice.
 
 
 ### Design Goals
@@ -18,9 +20,9 @@ Pyright was designed with performance in mind. It is not unusual for pyright to 
 
 Pyright was also designed to be used as the foundation for a Python [language server](https://microsoft.github.io/language-server-protocol/). Language servers provide interactive programming features such as completion suggestions, function signature help, type information on hover, semantic-aware search, semantic-aware renaming, semantic token coloring, refactoring tools, etc. For a good user experience, these features require highly responsive type evaluation performance during interactive code modification. They also require type evaluation to work on code that is incomplete and contains syntax errors.
 
-To achieve these design goals, pyright is implemented as a “lazy” or “just-in-time” type evaluator. Rather than analyzing all code in a module from top to bottom, it is able to evaluate the type of an arbitrary identifier anywhere within a module. If the type of that identifier depends on the types of other expressions or symbols, pyright recursively evaluates those in turn until it has enough information to determine the type of the requested identifier. By comparison, mypy uses a more traditional multi-pass architecture where semantic analysis is performed multiple times on a module from the top to the bottom until all types converge.
+To achieve these design goals, pyright is implemented as a “lazy” or “just-in-time” type evaluator. Rather than analyzing all code in a module from top to bottom, it is able to evaluate the type of an arbitrary identifier anywhere within a module. If the type of that identifier depends on the types of other expressions or symbols, pyright recursively evaluates those in turn until it has enough information to determine the type of the target identifier. By comparison, mypy uses a more traditional multi-pass architecture where semantic analysis is performed multiple times on a module from the top to the bottom until all types converge.
 
-Pyright implements its own parser, which recovers gracefully from syntax errors and continues parsing the remainder of the source file. By comparison, mypy uses the parser built in to the Python interpreter, and it does not support recovery after a syntax error.
+Pyright implements its own parser, which recovers gracefully from syntax errors and continues parsing the remainder of the source file. By comparison, mypy uses the parser built in to the Python interpreter, and it does not support recovery after a syntax error. This also means that when you run mypy on an older version of Python, it cannot support newer language features that require grammar changes.
 
 
 ### Type Checking Unannotated Code
@@ -50,14 +52,6 @@ def func1(val: object):
     else:
         return
     reveal_type(val) # mypy: object, pyright: str | int
-
-def func2(condition: bool, val1: str, val2: int):
-    x = val1 if condition else val2
-    reveal_type(x) # mypy: object, pyright: str | int
-
-    y = val1 or val2
-    # In this case, mypy uses a union instead of a join
-    reveal_type(y) # mypy: str | int, pyright: str | int
 ```
 
 
@@ -150,7 +144,6 @@ Pyright supports several built-in type guards that mypy does not currently suppo
 
 The following expression forms are not currently supported by mypy as type guards:
 * `x == L` and `x != L` (where L is an expression with a literal type)
-* `len(x) == L` and `len(x) != L` (where x is tuple and L is a literal integer)
 * `x in y` or `x not in y` (where y is instance of list, set, frozenset, deque, tuple, dict, defaultdict, or OrderedDict)
 * `bool(x)` (where x is any expression that is statically verifiable to be truthy or falsey in all cases)
 
@@ -158,42 +151,6 @@ The following expression forms are not currently supported by mypy as type guard
 ### Aliased Conditional Expressions
 
 Pyright supports the [aliasing of conditional expressions](type-concepts-advanced.md#aliased-conditional-expression) used for type guards. Mypy does not currently support this, but it is a frequently-requested feature.
-
-
-### Narrowing for Implied Else
-
-Pyright supports a feature called [type narrowing for implied else](type-concepts-advanced.md#narrowing-for-implied-else) in cases where an `if` or `elif` clause has no associated `else` clause. This feature allows pyright to determine that all cases have already been handled by the `if` or `elif` statement and that the "implied else" would never be executed if it were present. This eliminates certain false positive errors. Mypy currently does not support this.
-
-```python
-class Color(Enum):
-    RED = 1
-    BLUE = 2
-
-def is_red(color: Color) -> bool:
-    if color == Color.RED:
-        return True
-    elif color == Color.BLUE:
-        return False
-    # mypy reports error: Missing return statement
-```
-
-### Narrowing for Captured Variables
-
-If a variable’s type is narrowed in an outer scope and the variable is subsequently used within an inner-scoped function or lambda, mypy does not retain the narrowed type within the inner scope. Pyright retains the narrowed type if it can determine that the value of the captured variable is not modified on any code path after the inner-scope function or lambda is defined.
-
-```python
-def func(val: int | None):
-    if val is not None:
-
-        def inner_1() -> None:
-            reveal_type(val)  # pyright: int, mypy: int | None
-            print(val + 1)  # mypy produces a false positive error here
-
-        inner_2 = lambda: reveal_type(val) + 1  # pyright: int, mypy: int | None
-
-        inner_1()
-        inner_2()
-```
 
 
 ### Narrowing Any
@@ -255,7 +212,7 @@ x = 'a'
 reveal_type(x) # pyright: Literal['a'], mypy: str
 ```
 
-Pyright also supports “literal math” for simple operations between literals.
+Pyright also supports “literal math” for simple operations involving literals.
 
 ```python
 def func1(a: Literal[1, 2], b: Literal[2, 3]):
@@ -285,6 +242,13 @@ Pyright implements several parameter type inference techniques that improve type
 When pyright evaluates a call to a constructor, it attempts to follow the runtime behavior as closely as possible. At runtime, when a constructor is called, it invokes the `__call__` method of the metaclass. Most classes use `type` as their metaclass. (Even when a different metaclasses is used, it typically does not override `type.__call__`.) The `type.__call__` method calls the `__new__` method for the class and passes all of the arguments (both positional and keyword) that were passed to the constructor call. If the `__new__` method returns an instance of the class (or a child class), `type.__call__` then calls the `__init__` method on the class. Pyright follows this same flow for evaluating the type of a constructor call. If a custom metaclass is present, pyright evaluates its `__call__` method to determine whether it returns an instance of the class. If not, it assumes that the metaclass has custom behavior that overrides `type.__call__`. Likewise, if a class provides a `__new__` method that returns a type other than the class being constructed (or a child class thereof), it assumes that `__init__` will not be called.
 
 By comparison, mypy first evaluates the `__init__` method if present, and it ignores the annotated return type of the `__new__` method.
+
+
+### `None` Return Type
+
+If the return type of a function is declared as `None`, an attempt to call that function and consume the returned value is flagged as an error by mypy. The justification is that this is a common source of bugs.
+
+Pyright does not special-case `None` in this manner because there are legitimate use cases, and in our experience, this class of bug is rare.
 
 
 ### Constraint Solver Behaviors
@@ -346,10 +310,9 @@ def func2(x: list[int], y: list[str] | int):
     reveal_type(v2) # pyright: "list[int | str]" ("list[list[str] | int]" is also a valid answer)
 ```
 
+### Value-Constrained Type Variables
 
-### Constrained Type Variables
-
-When mypy analyzes a class or function that has in-scope constrained TypeVars, it analyzes the class or function multiple times, once for each constraint. This can produce multiple errors.
+When mypy analyzes a class or function that has in-scope value-constrained TypeVars, it analyzes the class or function multiple times, once for each constraint. This can produce multiple errors.
 
 ```python
 T = TypeVar("T", list[Any], set[Any])
@@ -359,7 +322,7 @@ def func(a: AnyStr, b: T):
     return a + b # Mypy reports 4 errors
 ```
 
-Pyright cannot use the same multi-pass technique as mypy in this case. It needs to produce a single type for any given identifier to support language server features. Pyright instead uses a mechanism called [conditional types](type-concepts-advanced.md#conditional-types-and-type-variables). This approach allows pyright to handle some constrained TypeVar use cases that mypy cannot, but there are conversely other use cases that mypy can handle and pyright cannot.
+Pyright cannot use the same multi-pass technique as mypy in this case. It needs to produce a single type for any given identifier to support language server features. Pyright instead uses a mechanism called [conditional types](type-concepts-advanced.md#conditional-types-and-type-variables). This approach allows pyright to handle some value-constrained TypeVar use cases that mypy cannot, but there are conversely other use cases that mypy can handle and pyright cannot.
 
 
 ### “Unknown” Type and Strict Mode
@@ -373,7 +336,20 @@ Pyright’s approach gives developers more control. It provides a way to be expl
 
 ### Overload Resolution
 
-Overload resolution rules are under-specified in PEP 484. Pyright and mypy apply similar rules, but there are likely some complex edge cases where different results will be produced. For full documentation of pyright’s overload behaviors, refer to [this documentation](type-concepts-advanced.md#overloads).
+Overload resolution rules are under-specified in PEP 484. Pyright and mypy apply similar rules, but there are inevitably cases where different results will be produced. For full documentation of pyright’s overload behaviors, refer to [this documentation](type-concepts-advanced.md#overloads).
+
+One known difference is in the handling of ambiguous overloads due to `Any` argument types where one return type is the supertype of all other return types. In this case, pyright evaluates the resulting return type as the supertype, but mypy evaluates the return type as `Any`. Pyright’s behavior here tries to preserve as much type information as possible, which is important for completion suggestions.
+
+```python
+@overload
+def func1(x: int) -> int: ...
+
+@overload
+def func1(x: str) -> float: ...
+
+def func2(val: Any):
+    reveal_type(func1(val)) # mypy: Any, pyright: float
+```
 
 
 ### Import Statements
@@ -450,4 +426,10 @@ x: float
 y: float
 x, y = (3, 4)
 ```
+
+### Plugins
+
+Mypy supports a plug-in mechanism, whereas pyright does not. Mypy plugins allow developers to extend mypy’s capabilities to accommodate libraries that rely on behaviors that cannot be described using the standard type checking mechanisms.
+
+Pyright maintainers have made the decision not to support plug-ins because of their many downsides: discoverability, maintainability, cost of development for the plug-in author, cost of maintenance for the plug-in object model and API, security, performance (especially latency — which is critical for language servers), and robustness. Instead, we have taken the approach of working with the typing community and library authors to extend the type system so it can accommodate more use cases. An example of this is [PEP 681](https://peps.python.org/pep-0681/), which introduced `dataclass_transform`.
 

@@ -8,7 +8,9 @@
  * methods.
  */
 
+import { Disposable } from 'vscode-jsonrpc';
 import * as debug from './debug';
+import { addIfUnique, removeArrayElements } from './collectionUtils';
 
 export enum LogLevel {
     Error = 'error',
@@ -16,12 +18,21 @@ export enum LogLevel {
     Info = 'info',
     Log = 'log',
 }
-
 export interface ConsoleInterface {
     error: (message: string) => void;
     warn: (message: string) => void;
     info: (message: string) => void;
     log: (message: string) => void;
+}
+
+export namespace ConsoleInterface {
+    export function is(obj: any): obj is ConsoleInterface {
+        return obj.error !== undefined && obj.warn !== undefined && obj.info !== undefined && obj.log !== undefined;
+    }
+
+    export function hasLevel(console: any): console is ConsoleInterface & { level: LogLevel } {
+        return is(console) && 'level' in console;
+    }
 }
 
 const levelMap = new Map([
@@ -125,8 +136,22 @@ export class StderrConsole implements ConsoleInterface {
     }
 }
 
-export class ConsoleWithLogLevel implements ConsoleInterface {
+export interface Chainable {
+    addChain(console: ConsoleInterface): void;
+    removeChain(console: ConsoleInterface): void;
+}
+
+export namespace Chainable {
+    export function is(value: any): value is Chainable {
+        return value && value.addChain && value.removeChain;
+    }
+}
+
+export class ConsoleWithLogLevel implements ConsoleInterface, Chainable, Disposable {
+    private readonly _chains: ConsoleInterface[] = [];
+
     private _maxLevel = 2;
+    private _disposed = false;
 
     constructor(private _console: ConsoleInterface, private _name = '') {}
 
@@ -154,6 +179,10 @@ export class ConsoleWithLogLevel implements ConsoleInterface {
         this._maxLevel = maxLevel;
     }
 
+    dispose() {
+        this._disposed = true;
+    }
+
     error(message: string) {
         this._log(LogLevel.Error, `${this._prefix}${message}`);
     }
@@ -170,11 +199,25 @@ export class ConsoleWithLogLevel implements ConsoleInterface {
         this._log(LogLevel.Log, `${this._prefix}${message}`);
     }
 
+    addChain(console: ConsoleInterface): void {
+        addIfUnique(this._chains, console);
+    }
+
+    removeChain(console: ConsoleInterface): void {
+        removeArrayElements(this._chains, (i) => i === console);
+    }
+
     private get _prefix() {
         return this._name ? `(${this._name}) ` : '';
     }
 
     private _log(level: LogLevel, message: string): void {
+        if (this._disposed) {
+            return;
+        }
+
+        this._processChains(level, message);
+
         if (this._getNumericalLevel(level) > this._maxLevel) {
             return;
         }
@@ -186,6 +229,10 @@ export class ConsoleWithLogLevel implements ConsoleInterface {
         const numericLevel = getLevelNumber(level);
         debug.assert(numericLevel !== undefined, 'Logger: unknown log level.');
         return numericLevel !== undefined ? numericLevel : 2;
+    }
+
+    private _processChains(level: LogLevel, message: string) {
+        this._chains.forEach((c) => log(c, level, message));
     }
 }
 

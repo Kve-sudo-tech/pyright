@@ -77,8 +77,6 @@ test('NewLines', () => {
 
     assert.equal(results.tokens.contains(5), true);
     assert.equal(results.tokens.contains(6), false);
-
-    assert.equal(results.lines.count, 4);
 });
 
 test('InvalidWithNewLine', () => {
@@ -1168,7 +1166,7 @@ test('Strings: good name escapes', () => {
     const stringToken0 = results.tokens.getItemAt(0) as StringToken;
     const unescapedValue0 = StringTokenUtils.getUnescapedString(stringToken0);
     assert.equal(stringToken0.type, TokenType.String);
-    assert.equal(stringToken0.flags, StringTokenFlags.DoubleQuote);
+    assert.equal(stringToken0.flags, StringTokenFlags.DoubleQuote | StringTokenFlags.NamedUnicodeEscape);
     assert.equal(stringToken0.length, 23);
     assert.equal(stringToken0.escapedValue, '\\N{caret escape blah}');
     assert.equal(unescapedValue0.value, '-');
@@ -1176,7 +1174,7 @@ test('Strings: good name escapes', () => {
     const stringToken1 = results.tokens.getItemAt(1) as StringToken;
     const unescapedValue1 = StringTokenUtils.getUnescapedString(stringToken1);
     assert.equal(stringToken1.type, TokenType.String);
-    assert.equal(stringToken1.flags, StringTokenFlags.DoubleQuote);
+    assert.equal(stringToken1.flags, StringTokenFlags.DoubleQuote | StringTokenFlags.NamedUnicodeEscape);
     assert.equal(stringToken1.length, 10);
     assert.equal(stringToken1.escapedValue, 'a\\N{A9}a');
     assert.equal(unescapedValue1.value, 'a-a');
@@ -1190,7 +1188,7 @@ test('Strings: bad name escapes', () => {
     const stringToken0 = results.tokens.getItemAt(0) as StringToken;
     const unescapedValue0 = StringTokenUtils.getUnescapedString(stringToken0);
     assert.equal(stringToken0.type, TokenType.String);
-    assert.equal(stringToken0.flags, StringTokenFlags.DoubleQuote);
+    assert.equal(stringToken0.flags, StringTokenFlags.DoubleQuote | StringTokenFlags.NamedUnicodeEscape);
     assert.equal(unescapedValue0.unescapeErrors.length, 1);
     assert.equal(stringToken0.length, 10);
     assert.equal(stringToken0.escapedValue, '\\N{caret');
@@ -1199,7 +1197,7 @@ test('Strings: bad name escapes', () => {
     const stringToken1 = results.tokens.getItemAt(1) as StringToken;
     const unescapedValue1 = StringTokenUtils.getUnescapedString(stringToken1);
     assert.equal(stringToken1.type, TokenType.String);
-    assert.equal(stringToken1.flags, StringTokenFlags.DoubleQuote);
+    assert.equal(stringToken1.flags, StringTokenFlags.DoubleQuote | StringTokenFlags.NamedUnicodeEscape);
     assert.equal(unescapedValue1.unescapeErrors.length, 1);
     assert.equal(stringToken1.length, 9);
     assert.equal(stringToken1.escapedValue, '\\N{.A9}');
@@ -1722,6 +1720,33 @@ test('Comments1', () => {
     assert.equal(results.tokens.contains(50), false);
 });
 
+test('Comments2', () => {
+    const t = new Tokenizer();
+    const results = t.tokenize('class A:\n    def func(self):\n        pass\n        # comment\n    ');
+    assert.equal(results.tokens.count, 16 + _implicitTokenCount);
+
+    const token17 = results.tokens.getItemAt(17);
+    assert.equal(token17.type, TokenType.EndOfStream);
+    assert.equal(token17.comments, undefined);
+    const start = token17.start;
+
+    const token16 = results.tokens.getItemAt(16);
+    assert.equal(token16.type, TokenType.Dedent);
+    assert.equal(token16.start, start);
+    assert.equal(token16.comments, undefined);
+
+    // When multiple tokens have the same start position (and 0-length)
+    // comments, if any, are stored on the first such token.
+    const token15 = results.tokens.getItemAt(15);
+    assert.equal(token15.type, TokenType.Dedent);
+    assert.equal(token15.start, start);
+    assert.equal(token15.comments!.length, 1);
+    assert.equal(token15.comments![0].value, ' comment');
+
+    const token14 = results.tokens.getItemAt(14);
+    assert.notEqual(token14.start, start);
+});
+
 test('Identifiers1', () => {
     const t = new Tokenizer();
     const results = t.tokenize('배열 数値 лік Opciók 可選值');
@@ -1827,4 +1852,19 @@ test('Normalization', () => {
     assert.equal(idToken.type, TokenType.Identifier);
     assert.equal(idToken.length, 2);
     assert.equal(idToken.value, 'R');
+});
+
+test('Last empty line', () => {
+    const t = new Tokenizer();
+    const results = t.tokenize('\r\n');
+    assert.equal(results.tokens.count, _implicitTokenCount);
+
+    const newLineToken = results.tokens.getItemAt(0) as NewLineToken;
+    assert.equal(newLineToken.type, TokenType.NewLine);
+    assert.equal(newLineToken.length, 2);
+    assert.equal(newLineToken.newLineType, NewLineType.CarriageReturnLineFeed);
+
+    const eofToken = results.tokens.getItemAt(1);
+    assert.equal(eofToken.type, TokenType.EndOfStream);
+    assert.equal(eofToken.length, 0);
 });

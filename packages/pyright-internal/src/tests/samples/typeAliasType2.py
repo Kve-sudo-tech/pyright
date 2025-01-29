@@ -1,7 +1,9 @@
 # This sample tests the TypeAliasType constructor.
 
-from typing import Callable, ParamSpec, TypeVar, TypeVarTuple
-from typing_extensions import TypeAliasType
+from typing import Callable, Generic, ParamSpec, TypeVar, TypeVarTuple
+from typing_extensions import (  # pyright: ignore[reportMissingModuleSource]
+    TypeAliasType,
+)
 
 T1 = TypeVar("T1")
 
@@ -45,3 +47,18 @@ TA6 = TypeAliasType("TA6", TA7)
 TA7 = TypeAliasType("TA7", TA6)
 
 JSONNode = TypeAliasType("JSONNode", list[JSONNode] | dict[str, JSONNode] | str | float)
+
+
+class A(Generic[T]):
+    L = TypeAliasType("L", list[T])
+
+
+# This should generate an error because S is not in scope.
+TA8 = TypeAliasType("TA8", list[S])
+
+
+def identity[T](t: T) -> T:
+    return t
+
+
+reveal_type(identity(TA1), expected_text="TypeAliasType")

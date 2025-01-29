@@ -38,7 +38,6 @@ import {
     DiagnosticTag,
     DidChangeConfigurationParams,
     DidChangeTextDocumentParams,
-    DidChangeWatchedFilesNotification,
     DidChangeWatchedFilesParams,
     DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
@@ -48,7 +47,6 @@ import {
     DocumentSymbol,
     DocumentSymbolParams,
     ExecuteCommandParams,
-    FileSystemWatcher,
     HoverParams,
     InitializeParams,
     InitializeResult,
@@ -64,236 +62,69 @@ import {
     SymbolInformation,
     TextDocumentPositionParams,
     TextDocumentSyncKind,
-    WatchKind,
     WorkDoneProgressReporter,
     WorkspaceEdit,
+    WorkspaceFoldersChangeEvent,
     WorkspaceSymbol,
     WorkspaceSymbolParams,
 } from 'vscode-languageserver';
-import { ResultProgressReporter, attachWorkDone } from 'vscode-languageserver/lib/common/progress';
+import { ResultProgressReporter } from 'vscode-languageserver';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { AnalysisResults } from './analyzer/analysis';
 import { BackgroundAnalysisProgram, InvalidatedReason } from './analyzer/backgroundAnalysisProgram';
-import { CacheManager } from './analyzer/cacheManager';
 import { ImportResolver } from './analyzer/importResolver';
 import { MaxAnalysisTime } from './analyzer/program';
-import { AnalyzerService, configFileNames, getNextServiceId } from './analyzer/service';
+import { AnalyzerService, LibraryReanalysisTimeProvider, getNextServiceId } from './analyzer/service';
 import { IPythonMode } from './analyzer/sourceFile';
 import type { BackgroundAnalysisBase } from './backgroundAnalysisBase';
 import { CommandResult } from './commands/commandResult';
-import { CancelAfter, CancellationProvider } from './common/cancellationUtils';
+import { CancelAfter } from './common/cancellationUtils';
+import { CaseSensitivityDetector } from './common/caseSensitivityDetector';
 import { getNestedProperty } from './common/collectionUtils';
-import {
-    DiagnosticSeverityOverrides,
-    DiagnosticSeverityOverridesMap,
-    getDiagnosticSeverityOverrides,
-} from './common/commandLineOptions';
-import { ConfigOptions, SignatureDisplayType, getDiagLevelDiagnosticRules } from './common/configOptions';
+import { DiagnosticSeverityOverrides, getDiagnosticSeverityOverrides } from './common/commandLineOptions';
+import { ConfigOptions, getDiagLevelDiagnosticRules, parseDiagLevel } from './common/configOptions';
 import { ConsoleInterface, ConsoleWithLogLevel, LogLevel } from './common/console';
-import {
-    Diagnostic as AnalyzerDiagnostic,
-    DiagnosticCategory,
-    TaskListPriority,
-    TaskListToken,
-} from './common/diagnostic';
+import { Diagnostic as AnalyzerDiagnostic, DiagnosticCategory } from './common/diagnostic';
 import { DiagnosticRule } from './common/diagnosticRules';
 import { FileDiagnostics } from './common/diagnosticSink';
-import { Extensions } from './common/extensibility';
-import { FileSystem, FileWatcherEventType, FileWatcherHandler } from './common/fileSystem';
+import { FileSystem, ReadOnlyFileSystem } from './common/fileSystem';
+import { FileWatcherEventType } from './common/fileWatcher';
 import { Host } from './common/host';
-import { fromLSPAny } from './common/lspUtils';
-import { convertPathToUri, deduplicateFolders, getDirectoryPath, getFileName, isFile } from './common/pathUtils';
+import {
+    ClientCapabilities,
+    LanguageServerInterface,
+    ServerOptions,
+    ServerSettings,
+    WorkspaceServices,
+} from './common/languageServerInterface';
+import { fromLSPAny, isNullProgressReporter } from './common/lspUtils';
 import { ProgressReportTracker, ProgressReporter } from './common/progressReporter';
+import { ServiceKeys } from './common/serviceKeys';
+import { ServiceProvider } from './common/serviceProvider';
 import { DocumentRange, Position, Range } from './common/textRange';
-import { UriParser } from './common/uriParser';
+import { Uri } from './common/uri/uri';
+import { convertUriToLspUriString } from './common/uri/uriUtils';
 import { AnalyzerServiceExecutor } from './languageService/analyzerServiceExecutor';
 import { CallHierarchyProvider } from './languageService/callHierarchyProvider';
 import { CompletionItemData, CompletionProvider } from './languageService/completionProvider';
 import { DefinitionFilter, DefinitionProvider, TypeDefinitionProvider } from './languageService/definitionProvider';
 import { DocumentHighlightProvider } from './languageService/documentHighlightProvider';
+import { CollectionResult } from './languageService/documentSymbolCollector';
 import { DocumentSymbolProvider } from './languageService/documentSymbolProvider';
+import { DynamicFeature, DynamicFeatures } from './languageService/dynamicFeature';
+import { FileWatcherDynamicFeature } from './languageService/fileWatcherDynamicFeature';
 import { HoverProvider } from './languageService/hoverProvider';
 import { canNavigateToFile } from './languageService/navigationUtils';
 import { ReferencesProvider } from './languageService/referencesProvider';
-import { SignatureHelpProvider } from './languageService/signatureHelpProvider';
-import { Localizer, setLocaleOverride } from './localization/localize';
-import { PyrightFileSystem } from './pyrightFileSystem';
-import { InitStatus, WellKnownWorkspaceKinds, Workspace, WorkspaceFactory } from './workspaceFactory';
 import { RenameProvider } from './languageService/renameProvider';
+import { SignatureHelpProvider } from './languageService/signatureHelpProvider';
 import { WorkspaceSymbolProvider } from './languageService/workspaceSymbolProvider';
+import { Localizer, setLocaleOverride } from './localization/localize';
+import { ParseFileResults } from './parser/parser';
+import { InitStatus, WellKnownWorkspaceKinds, Workspace, WorkspaceFactory } from './workspaceFactory';
 
-export interface ServerSettings {
-    venvPath?: string | undefined;
-    pythonPath?: string | undefined;
-    typeshedPath?: string | undefined;
-    stubPath?: string | undefined;
-    openFilesOnly?: boolean | undefined;
-    typeCheckingMode?: string | undefined;
-    useLibraryCodeForTypes?: boolean | undefined;
-    disableLanguageServices?: boolean | undefined;
-    disableOrganizeImports?: boolean | undefined;
-    autoSearchPaths?: boolean | undefined;
-    extraPaths?: string[] | undefined;
-    watchForSourceChanges?: boolean | undefined;
-    watchForLibraryChanges?: boolean | undefined;
-    watchForConfigChanges?: boolean | undefined;
-    diagnosticSeverityOverrides?: DiagnosticSeverityOverridesMap | undefined;
-    logLevel?: LogLevel | undefined;
-    autoImportCompletions?: boolean | undefined;
-    indexing?: boolean | undefined;
-    logTypeEvaluationTime?: boolean | undefined;
-    typeEvaluationTimeThreshold?: number | undefined;
-    fileSpecs?: string[];
-    excludeFileSpecs?: string[];
-    ignoreFileSpecs?: string[];
-    taskListTokens?: TaskListToken[];
-    functionSignatureDisplay?: SignatureDisplayType | undefined;
-}
-
-export interface MessageAction {
-    title: string;
-    id: string;
-}
-
-export interface WindowInterface {
-    showErrorMessage(message: string): void;
-    showErrorMessage(message: string, ...actions: MessageAction[]): Promise<MessageAction | undefined>;
-
-    showWarningMessage(message: string): void;
-    showWarningMessage(message: string, ...actions: MessageAction[]): Promise<MessageAction | undefined>;
-
-    showInformationMessage(message: string): void;
-    showInformationMessage(message: string, ...actions: MessageAction[]): Promise<MessageAction | undefined>;
-}
-
-export interface LanguageServerInterface {
-    readonly rootPath: string;
-    readonly console: ConsoleInterface;
-    readonly window: WindowInterface;
-    readonly supportAdvancedEdits: boolean;
-
-    getWorkspaces(): Promise<Workspace[]>;
-    getWorkspaceForFile(filePath: string): Promise<Workspace>;
-    getSettings(workspace: Workspace): Promise<ServerSettings>;
-    createBackgroundAnalysis(serviceId: string): BackgroundAnalysisBase | undefined;
-    reanalyze(): void;
-    restart(): void;
-    decodeTextDocumentUri(uriString: string): string;
-}
-
-export interface ServerOptions {
-    productName: string;
-    rootDirectory: string;
-    version: string;
-    cancellationProvider: CancellationProvider;
-    fileSystem: FileSystem;
-    fileWatcherHandler: FileWatcherHandler;
-    maxAnalysisTimeInForeground?: MaxAnalysisTime;
-    disableChecker?: boolean;
-    supportedCommands?: string[];
-    supportedCodeActions?: string[];
-    supportsTelemetry?: boolean;
-}
-
-export interface WorkspaceServices {
-    fs: FileSystem;
-    backgroundAnalysis: BackgroundAnalysisBase | undefined;
-}
-
-export interface ClientCapabilities {
-    hasConfigurationCapability: boolean;
-    hasVisualStudioExtensionsCapability: boolean;
-    hasWorkspaceFoldersCapability: boolean;
-    hasWatchFileCapability: boolean;
-    hasWatchFileRelativePathCapability: boolean;
-    hasActiveParameterCapability: boolean;
-    hasSignatureLabelOffsetCapability: boolean;
-    hasHierarchicalDocumentSymbolCapability: boolean;
-    hasWindowProgressCapability: boolean;
-    hasGoToDeclarationCapability: boolean;
-    hasDocumentChangeCapability: boolean;
-    hasDocumentAnnotationCapability: boolean;
-    hasCompletionCommitCharCapability: boolean;
-    hoverContentFormat: MarkupKind;
-    completionDocFormat: MarkupKind;
-    completionSupportsSnippet: boolean;
-    signatureDocFormat: MarkupKind;
-    supportsDeprecatedDiagnosticTag: boolean;
-    supportsUnnecessaryDiagnosticTag: boolean;
-    supportsTaskItemDiagnosticTag: boolean;
-    completionItemResolveSupportsAdditionalTextEdits: boolean;
-}
-
-const nullProgressReporter = attachWorkDone(undefined as any, /* params */ undefined);
-
-/*
- * Additional DiagnosticTag values that are specific to Visual Studio.
- * These must match the values in https://dev.azure.com/devdiv/DevDiv/_git/vslanguageserverclient?path=%2Fsrc%2Fproduct%2FProtocol%2FLanguageServer.Protocol.Extensions%2FVSDiagnosticTags.cs&version=GBdevelop&_a=contents
- */
-namespace VSDiagnosticTag {
-    /**
-     * A diagnostic entry generated by the build.
-     */
-    export const BuildError = -1;
-
-    /**
-     * A diagnostic entry generated by Intellisense.
-     */
-    export const IntellisenseError = -2;
-
-    /**
-     * A diagnostic entry that could be generated from both builds and Intellisense.
-     *
-     * Diagnostic entries tagged with PotentialDuplicate will be hidden
-     * in the error list if the error list is displaying build and intellisense errors.
-     */
-    export const PotentialDuplicate = -3;
-
-    /**
-     * A diagnostic entry that is never displayed in the error list.
-     */
-    export const HiddenInErrorList = -4;
-
-    /**
-     * A diagnostic entry that is always displayed in the error list.
-     */
-    export const VisibleInErrorList = -5;
-
-    /**
-     * A diagnostic entry that is never displayed in the editor.
-     */
-    export const HiddenInEditor = -6;
-
-    /**
-     * No tooltip is shown for the Diagnostic entry in the editor.
-     */
-    export const SuppressEditorToolTip = -7;
-
-    /**
-     * A diagnostic entry that is represented in the editor as an Edit and Continue error.
-     */
-    export const EditAndContinueError = -8;
-
-    /**
-     * A diagnostic entry that is represented in the editor as a Task List item (View -> Task List)
-     */
-    export const TaskItem = -9;
-}
-
-/*
- * DiagnosticRank values that are specific to Visual Studio.
- * These must match the values in https://dev.azure.com/devdiv/DevDiv/_git/vslanguageserverclient?path=/src/product/Protocol/LanguageServer.Protocol.Extensions/VSDiagnosticRank.cs&version=GBdevelop&_a=contents
- */
-namespace VSDiagnosticRank {
-    export const Highest = 100;
-    export const High = 200;
-    export const Default = 300;
-    export const Low = 400;
-    export const Lowest = 500;
-}
-
-export abstract class LanguageServerBase implements LanguageServerInterface {
+export abstract class LanguageServerBase implements LanguageServerInterface, Disposable {
     // We support running only one "find all reference" at a time.
     private _pendingFindAllRefsCancellationSource: AbstractCancellationTokenSource | undefined;
 
@@ -304,12 +135,8 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
 
     private _lastTriggerKind: CompletionTriggerKind | undefined = CompletionTriggerKind.Invoked;
 
-    private _lastFileWatcherRegistration: Disposable | undefined;
-
     private _initialized = false;
-
-    // Global root path - the basis for all global settings.
-    rootPath = '';
+    private _workspaceFoldersChangedDisposable: Disposable | undefined;
 
     protected client: ClientCapabilities = {
         hasConfigurationCapability: false,
@@ -336,21 +163,21 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     };
 
     protected defaultClientConfig: any;
-    protected workspaceFactory: WorkspaceFactory;
-    protected openFileMap = new Map<string, TextDocument>();
-    protected cacheManager: CacheManager;
-    protected fs: PyrightFileSystem;
-    protected uriParser: UriParser;
 
-    constructor(
-        protected serverOptions: ServerOptions,
-        protected connection: Connection,
-        readonly console: ConsoleInterface,
-        uriParserFactory = (fs: FileSystem) => new UriParser(fs)
-    ) {
+    protected readonly workspaceFactory: WorkspaceFactory;
+    protected readonly openFileMap = new Map<string, TextDocument>();
+    protected readonly fs: FileSystem;
+    protected readonly caseSensitiveDetector: CaseSensitivityDetector;
+
+    // The URIs for which diagnostics are reported
+    protected readonly documentsWithDiagnostics = new Set<string>();
+
+    protected readonly dynamicFeatures = new DynamicFeatures();
+
+    constructor(protected serverOptions: ServerOptions, protected connection: Connection) {
         // Stash the base directory into a global variable.
         // This must happen before fs.getModulePath().
-        (global as any).__rootDirectory = serverOptions.rootDirectory;
+        (global as any).__rootDirectory = serverOptions.rootDirectory.getFilePath();
 
         this.console.info(
             `${serverOptions.productName} language server ${
@@ -360,17 +187,15 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
 
         this.console.info(`Server root directory: ${serverOptions.rootDirectory}`);
 
-        this.cacheManager = new CacheManager();
-
-        this.fs = new PyrightFileSystem(this.serverOptions.fileSystem);
-        this.uriParser = uriParserFactory(this.fs);
+        this.fs = this.serverOptions.serviceProvider.fs();
+        this.caseSensitiveDetector = this.serverOptions.serviceProvider.get(ServiceKeys.caseSensitivityDetector);
 
         this.workspaceFactory = new WorkspaceFactory(
             this.console,
-            this.uriParser,
             this.createAnalyzerServiceForWorkspace.bind(this),
-            this.isPythonPathImmutable.bind(this),
-            this.onWorkspaceCreated.bind(this)
+            this.onWorkspaceCreated.bind(this),
+            this.onWorkspaceRemoved.bind(this),
+            this.serviceProvider
         );
 
         // Set the working directory to a known location within
@@ -388,9 +213,10 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
 
         // Listen on the connection.
         this.connection.listen();
+    }
 
-        // Setup extensions
-        Extensions.createLanguageServiceExtensions(this);
+    get console(): ConsoleInterface {
+        return this.serverOptions.serviceProvider.console();
     }
 
     // Provides access to the client's window.
@@ -402,12 +228,18 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         return this.client.hasDocumentChangeCapability && this.client.hasDocumentAnnotationCapability;
     }
 
-    // Convert uri to path
-    decodeTextDocumentUri(uriString: string): string {
-        return this.uriParser.decodeTextDocumentUri(uriString);
+    get serviceProvider() {
+        return this.serverOptions.serviceProvider;
     }
 
-    abstract createBackgroundAnalysis(serviceId: string): BackgroundAnalysisBase | undefined;
+    dispose() {
+        this.workspaceFactory.clear();
+        this.openFileMap.clear();
+        this.dynamicFeatures.unregister();
+        this._workspaceFoldersChangedDisposable?.dispose();
+    }
+
+    abstract createBackgroundAnalysis(serviceId: string, workspaceRoot: Uri): BackgroundAnalysisBase | undefined;
 
     abstract getSettings(workspace: Workspace): Promise<ServerSettings>;
 
@@ -415,23 +247,26 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     // program within a workspace.
     createAnalyzerService(
         name: string,
+        workspaceRoot: Uri,
         services?: WorkspaceServices,
-        libraryReanalysisTimeProvider?: () => number
+        libraryReanalysisTimeProvider?: LibraryReanalysisTimeProvider
     ): AnalyzerService {
         this.console.info(`Starting service instance "${name}"`);
 
         const serviceId = getNextServiceId(name);
-        const service = new AnalyzerService(name, services?.fs ?? this.fs, {
+        const service = new AnalyzerService(name, this.serverOptions.serviceProvider, {
             console: this.console,
             hostFactory: this.createHost.bind(this),
             importResolverFactory: this.createImportResolver.bind(this),
-            backgroundAnalysis: services ? services.backgroundAnalysis : this.createBackgroundAnalysis(serviceId),
+            backgroundAnalysis: services
+                ? services.backgroundAnalysis
+                : this.createBackgroundAnalysis(serviceId, workspaceRoot),
             maxAnalysisTime: this.serverOptions.maxAnalysisTimeInForeground,
             backgroundAnalysisProgramFactory: this.createBackgroundAnalysisProgram.bind(this),
             cancellationProvider: this.serverOptions.cancellationProvider,
             libraryReanalysisTimeProvider,
-            cacheManager: this.cacheManager,
             serviceId,
+            fileSystem: services?.fs ?? this.serverOptions.serviceProvider.fs(),
         });
 
         service.setCompletionCallback((results) => this.onAnalysisCompletedHandler(service.fs, results));
@@ -439,7 +274,7 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     }
 
     async getWorkspaces(): Promise<Workspace[]> {
-        const workspaces = [...this.workspaceFactory.items()];
+        const workspaces = this.workspaceFactory.items();
         for (const workspace of workspaces) {
             await workspace.isInitialized.promise;
         }
@@ -447,12 +282,12 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         return workspaces;
     }
 
-    async getWorkspaceForFile(filePath: string, pythonPath?: string): Promise<Workspace> {
-        return this.workspaceFactory.getWorkspaceForFile(filePath, pythonPath);
+    async getWorkspaceForFile(fileUri: Uri, pythonPath?: Uri): Promise<Workspace> {
+        return this.workspaceFactory.getWorkspaceForFile(fileUri, pythonPath);
     }
 
-    async getContainingWorkspacesForFile(filePath: string): Promise<Workspace[]> {
-        return this.workspaceFactory.getContainingWorkspacesForFile(filePath);
+    async getContainingWorkspacesForFile(fileUri: Uri): Promise<Workspace[]> {
+        return this.workspaceFactory.getContainingWorkspacesForFile(fileUri);
     }
 
     reanalyze() {
@@ -479,7 +314,7 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         });
 
         Promise.all(tasks).then(() => {
-            this._setupFileWatcher();
+            this.dynamicFeatures.register();
         });
     }
 
@@ -488,26 +323,28 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         status: InitStatus | undefined,
         serverSettings?: ServerSettings
     ): Promise<void> {
-        status?.markCalled();
+        try {
+            status?.markCalled();
 
-        serverSettings = serverSettings ?? (await this.getSettings(workspace));
+            serverSettings = serverSettings ?? (await this.getSettings(workspace));
 
-        // Set logging level first.
-        (this.console as ConsoleWithLogLevel).level = serverSettings.logLevel ?? LogLevel.Info;
+            // Set logging level first.
+            (this.console as ConsoleWithLogLevel).level = serverSettings.logLevel ?? LogLevel.Info;
 
-        // Apply the new path to the workspace (before restarting the service).
-        serverSettings.pythonPath = this.workspaceFactory.applyPythonPath(workspace, serverSettings.pythonPath);
+            this.dynamicFeatures.update(serverSettings);
 
-        // Then use the updated settings to restart the service.
-        this.updateOptionsAndRestartService(workspace, serverSettings);
+            // Then use the updated settings to restart the service.
+            this.updateOptionsAndRestartService(workspace, serverSettings);
 
-        workspace.disableLanguageServices = !!serverSettings.disableLanguageServices;
-        workspace.disableOrganizeImports = !!serverSettings.disableOrganizeImports;
-
-        // Don't use workspace.isInitialized directly since it might have been
-        // reset due to pending config change event.
-        // The workspace is now open for business.
-        status?.resolve();
+            workspace.disableLanguageServices = !!serverSettings.disableLanguageServices;
+            workspace.disableTaggedHints = !!serverSettings.disableTaggedHints;
+            workspace.disableOrganizeImports = !!serverSettings.disableOrganizeImports;
+        } finally {
+            // Don't use workspace.isInitialized directly since it might have been
+            // reset due to pending config change event.
+            // The workspace is now open for business.
+            status?.resolve();
+        }
     }
 
     updateOptionsAndRestartService(
@@ -515,31 +352,25 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         serverSettings: ServerSettings,
         typeStubTargetImportName?: string
     ) {
-        AnalyzerServiceExecutor.runWithOptions(this.rootPath, workspace, serverSettings, typeStubTargetImportName);
-        workspace.searchPathsToWatch = workspace.service.librarySearchPathsToWatch ?? [];
+        AnalyzerServiceExecutor.runWithOptions(workspace, serverSettings, { typeStubTargetImportName });
+        workspace.searchPathsToWatch = workspace.service.librarySearchUrisToWatch ?? [];
     }
 
     protected abstract executeCommand(params: ExecuteCommandParams, token: CancellationToken): Promise<any>;
 
     protected abstract isLongRunningCommand(command: string): boolean;
+    protected abstract isRefactoringCommand(command: string): boolean;
 
     protected abstract executeCodeAction(
         params: CodeActionParams,
         token: CancellationToken
     ): Promise<(Command | CodeAction)[] | undefined | null>;
 
-    protected isPythonPathImmutable(filePath: string): boolean {
-        // This function is called to determine if the file is using
-        // a special pythonPath separate from a workspace or not.
-        // The default is no.
-        return false;
-    }
-
-    protected async getConfiguration(scopeUri: string | undefined, section: string) {
+    protected async getConfiguration(scopeUri: Uri | undefined, section: string) {
         if (this.client.hasConfigurationCapability) {
             const item: ConfigurationItem = {};
             if (scopeUri !== undefined) {
-                item.scopeUri = scopeUri;
+                item.scopeUri = scopeUri.toString();
             }
             if (section !== undefined) {
                 item.section = section;
@@ -558,8 +389,11 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         return diagnosticMode !== 'workspace';
     }
 
-    protected getSeverityOverrides(value: string): DiagnosticSeverityOverrides | undefined {
-        const enumValue = value as DiagnosticSeverityOverrides;
+    protected getSeverityOverrides(value: string | boolean): DiagnosticSeverityOverrides | undefined {
+        const enumValue = parseDiagLevel(value);
+        if (!enumValue) {
+            return undefined;
+        }
         if (getDiagnosticSeverityOverrides().includes(enumValue)) {
             return enumValue;
         }
@@ -577,26 +411,28 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     }
 
     protected abstract createHost(): Host;
-    protected abstract createImportResolver(fs: FileSystem, options: ConfigOptions, host: Host): ImportResolver;
+    protected abstract createImportResolver(
+        serviceProvider: ServiceProvider,
+        options: ConfigOptions,
+        host: Host
+    ): ImportResolver;
 
     protected createBackgroundAnalysisProgram(
         serviceId: string,
-        console: ConsoleInterface,
+        serviceProvider: ServiceProvider,
         configOptions: ConfigOptions,
         importResolver: ImportResolver,
         backgroundAnalysis?: BackgroundAnalysisBase,
-        maxAnalysisTime?: MaxAnalysisTime,
-        cacheManager?: CacheManager
+        maxAnalysisTime?: MaxAnalysisTime
     ): BackgroundAnalysisProgram {
         return new BackgroundAnalysisProgram(
             serviceId,
-            console,
+            serviceProvider,
             configOptions,
             importResolver,
             backgroundAnalysis,
             maxAnalysisTime,
-            /* disableChecker */ undefined,
-            cacheManager
+            /* disableChecker */ undefined
         );
     }
 
@@ -637,9 +473,9 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         this.connection.onRenameRequest(async (params, token) => this.onRenameRequest(params, token));
 
         const callHierarchy = this.connection.languages.callHierarchy;
-        callHierarchy.onPrepare(async (params, token) => this.onPrepare(params, token));
-        callHierarchy.onIncomingCalls(async (params, token) => this.onIncomingCalls(params, token));
-        callHierarchy.onOutgoingCalls(async (params, token) => this.onOutgoingCalls(params, token));
+        callHierarchy.onPrepare(async (params, token) => this.onCallHierarchyPrepare(params, token));
+        callHierarchy.onIncomingCalls(async (params, token) => this.onCallHierarchyIncomingCalls(params, token));
+        callHierarchy.onOutgoingCalls(async (params, token) => this.onCallHierarchyOutgoingCalls(params, token));
 
         this.connection.onDidOpenTextDocument(async (params) => this.onDidOpenTextDocument(params));
         this.connection.onDidChangeTextDocument(async (params) => this.onDidChangeTextDocument(params));
@@ -652,16 +488,14 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         this.connection.onShutdown(async (token) => this.onShutdown(token));
     }
 
-    protected initialize(
+    protected async initialize(
         params: InitializeParams,
         supportedCommands: string[],
         supportedCodeActions: string[]
-    ): InitializeResult {
+    ): Promise<InitializeResult> {
         if (params.locale) {
             setLocaleOverride(params.locale);
         }
-
-        this.rootPath = params.rootPath || '';
 
         const capabilities = params.capabilities;
         this.client.hasConfigurationCapability = !!capabilities.workspace?.configuration;
@@ -711,6 +545,17 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         // Create a service instance for each of the workspace folders.
         this.workspaceFactory.handleInitialize(params);
 
+        if (this.client.hasWatchFileCapability) {
+            this.addDynamicFeature(
+                new FileWatcherDynamicFeature(
+                    this.connection,
+                    this.client.hasWatchFileRelativePathCapability,
+                    this.fs,
+                    this.workspaceFactory
+                )
+            );
+        }
+
         const result: InitializeResult = {
             capabilities: {
                 textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -759,6 +604,13 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     }
 
     protected onInitialized() {
+        this.handleInitialized((event) => {
+            this.workspaceFactory.handleWorkspaceFoldersChanged(event, null);
+            this.dynamicFeatures.register();
+        });
+    }
+
+    protected handleInitialized(changeWorkspaceFolderHandler: (e: WorkspaceFoldersChangeEvent) => any) {
         // Mark as initialized. We need this to make sure to
         // not send config updates before this point.
         this._initialized = true;
@@ -769,12 +621,10 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
             return;
         }
 
-        this.connection.workspace.onDidChangeWorkspaceFolders((event) => {
-            this.workspaceFactory.handleWorkspaceFoldersChanged(event);
-            this._setupFileWatcher();
-        });
+        this._workspaceFoldersChangedDisposable =
+            this.connection.workspace.onDidChangeWorkspaceFolders(changeWorkspaceFolderHandler);
 
-        this._setupFileWatcher();
+        this.dynamicFeatures.register();
     }
 
     protected onDidChangeConfiguration(params: DidChangeConfigurationParams) {
@@ -832,7 +682,7 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         filter: DefinitionFilter,
         getDefinitionsFunc: (
             workspace: Workspace,
-            filePath: string,
+            fileUri: Uri,
             position: Position,
             filter: DefinitionFilter,
             token: CancellationToken
@@ -840,37 +690,39 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     ) {
         this.recordUserInteractionTime();
 
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
 
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return undefined;
         }
 
-        const locations = getDefinitionsFunc(workspace, filePath, position, filter, token);
+        const locations = getDefinitionsFunc(workspace, uri, params.position, filter, token);
         if (!locations) {
             return undefined;
         }
         return locations
-            .filter((loc) => this.canNavigateToFile(loc.path, workspace.service.fs))
-            .map((loc) => Location.create(convertPathToUri(workspace.service.fs, loc.path), loc.range));
+            .filter((loc) => this.canNavigateToFile(loc.uri, workspace.service.fs))
+            .map((loc) => Location.create(convertUriToLspUriString(workspace.service.fs, loc.uri), loc.range));
     }
 
     protected async onReferences(
         params: ReferenceParams,
         token: CancellationToken,
         workDoneReporter: WorkDoneProgressReporter,
-        resultReporter: ResultProgressReporter<Location[]> | undefined
+        resultReporter: ResultProgressReporter<Location[]> | undefined,
+        createDocumentRange?: (uri: Uri, result: CollectionResult, parseResults: ParseFileResults) => DocumentRange,
+        convertToLocation?: (fs: ReadOnlyFileSystem, ranges: DocumentRange) => Location | undefined
     ): Promise<Location[] | null | undefined> {
         if (this._pendingFindAllRefsCancellationSource) {
             this._pendingFindAllRefsCancellationSource.cancel();
             this._pendingFindAllRefsCancellationSource = undefined;
         }
 
-        // VS Code doesn't support cancellation of "final all references".
+        // VS Code doesn't support cancellation of "find all references".
         // We provide a progress bar a cancellation button so the user can cancel
         // any long-running actions.
-        const progress = await this._getProgressReporter(
+        const progress = await this.getProgressReporter(
             workDoneReporter,
             Localizer.CodeAction.findingReferences(),
             token
@@ -880,23 +732,20 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         this._pendingFindAllRefsCancellationSource = source;
 
         try {
-            const { filePath, position } = this.uriParser.decodeTextDocumentPosition(
-                params.textDocument,
-                params.position
-            );
+            const uri = this.convertLspUriStringToUri(params.textDocument.uri);
 
-            const workspace = await this.getWorkspaceForFile(filePath);
+            const workspace = await this.getWorkspaceForFile(uri);
             if (workspace.disableLanguageServices) {
                 return;
             }
 
             return workspace.service.run((program) => {
-                return new ReferencesProvider(program, source.token).reportReferences(
-                    filePath,
-                    position,
-                    params.context.includeDeclaration,
-                    resultReporter
-                );
+                return new ReferencesProvider(
+                    program,
+                    source.token,
+                    createDocumentRange,
+                    convertToLocation
+                ).reportReferences(uri, params.position, params.context.includeDeclaration, resultReporter);
             }, token);
         } finally {
             progress.reporter.done();
@@ -910,8 +759,8 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     ): Promise<DocumentSymbol[] | SymbolInformation[] | null | undefined> {
         this.recordUserInteractionTime();
 
-        const filePath = this.uriParser.decodeTextDocumentUri(params.textDocument.uri);
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return undefined;
         }
@@ -919,8 +768,9 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         return workspace.service.run((program) => {
             return new DocumentSymbolProvider(
                 program,
-                filePath,
+                uri,
                 this.client.hasHierarchicalDocumentSymbolCapability,
+                { includeAliases: false },
                 token
             ).getSymbols();
         }, token);
@@ -942,11 +792,14 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     }
 
     protected async onHover(params: HoverParams, token: CancellationToken) {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
+        const workspace = await this.getWorkspaceForFile(uri);
+        if (workspace.disableLanguageServices) {
+            return undefined;
+        }
 
         return workspace.service.run((program) => {
-            return new HoverProvider(program, filePath, position, this.client.hoverContentFormat, token).getHover();
+            return new HoverProvider(program, uri, params.position, this.client.hoverContentFormat, token).getHover();
         }, token);
     }
 
@@ -954,11 +807,11 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         params: DocumentHighlightParams,
         token: CancellationToken
     ): Promise<DocumentHighlight[] | null | undefined> {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
+        const workspace = await this.getWorkspaceForFile(uri);
 
         return workspace.service.run((program) => {
-            return new DocumentHighlightProvider(program, filePath, position, token).getDocumentHighlight();
+            return new DocumentHighlightProvider(program, uri, params.position, token).getDocumentHighlight();
         }, token);
     }
 
@@ -966,9 +819,9 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         params: SignatureHelpParams,
         token: CancellationToken
     ): Promise<SignatureHelp | undefined | null> {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
 
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return;
         }
@@ -976,12 +829,13 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         return workspace.service.run((program) => {
             return new SignatureHelpProvider(
                 program,
-                filePath,
-                position,
+                uri,
+                params.position,
                 this.client.signatureDocFormat,
                 this.client.hasSignatureLabelOffsetCapability,
                 this.client.hasActiveParameterCapability,
                 params.context,
+                program.serviceProvider.docStringService(),
                 token
             ).getSignatureHelp();
         }, token);
@@ -1008,8 +862,8 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     }
 
     protected async onCompletion(params: CompletionParams, token: CancellationToken): Promise<CompletionList | null> {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return null;
         }
@@ -1017,9 +871,8 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         return workspace.service.run((program) => {
             const completions = new CompletionProvider(
                 program,
-                workspace.rootPath,
-                filePath,
-                position,
+                uri,
+                params.position,
                 {
                     format: this.client.completionDocFormat,
                     snippet: this.client.completionSupportsSnippet,
@@ -1042,13 +895,13 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     // cache that result and never call us back.
     protected async onCompletionResolve(params: CompletionItem, token: CancellationToken): Promise<CompletionItem> {
         const completionItemData = fromLSPAny<CompletionItemData>(params.data);
-        if (completionItemData && completionItemData.filePath) {
-            const workspace = await this.getWorkspaceForFile(completionItemData.filePath);
+        if (completionItemData && completionItemData.uri) {
+            const uri = Uri.parse(completionItemData.uri, this.caseSensitiveDetector);
+            const workspace = await this.getWorkspaceForFile(uri);
             workspace.service.run((program) => {
                 return new CompletionProvider(
                     program,
-                    workspace.rootPath,
-                    completionItemData.filePath,
+                    uri,
                     completionItemData.position,
                     {
                         format: this.client.completionDocFormat,
@@ -1066,16 +919,16 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         params: PrepareRenameParams,
         token: CancellationToken
     ): Promise<Range | { range: Range; placeholder: string } | null> {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
-        const isUntitled = this.uriParser.isUntitled(params.textDocument.uri);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
+        const isUntitled = uri.isUntitled();
 
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return null;
         }
 
         return workspace.service.run((program) => {
-            return new RenameProvider(program, filePath, position, token).canRenameSymbol(
+            return new RenameProvider(program, uri, params.position, token).canRenameSymbol(
                 workspace.kinds.includes(WellKnownWorkspaceKinds.Default),
                 isUntitled
             );
@@ -1086,16 +939,16 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         params: RenameParams,
         token: CancellationToken
     ): Promise<WorkspaceEdit | null | undefined> {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
-        const isUntitled = this.uriParser.isUntitled(params.textDocument.uri);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
+        const isUntitled = uri.isUntitled();
 
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return;
         }
 
         return workspace.service.run((program) => {
-            return new RenameProvider(program, filePath, position, token).renameSymbol(
+            return new RenameProvider(program, uri, params.position, token).renameSymbol(
                 params.newName,
                 workspace.kinds.includes(WellKnownWorkspaceKinds.Default),
                 isUntitled
@@ -1103,122 +956,112 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         }, token);
     }
 
-    protected async onPrepare(
+    protected async onCallHierarchyPrepare(
         params: CallHierarchyPrepareParams,
         token: CancellationToken
     ): Promise<CallHierarchyItem[] | null> {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.textDocument, params.position);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
 
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return null;
         }
 
         return workspace.service.run((program) => {
-            return new CallHierarchyProvider(program, filePath, position, token).onPrepare();
+            return new CallHierarchyProvider(program, uri, params.position, token).onPrepare();
         }, token);
     }
 
-    protected async onIncomingCalls(params: CallHierarchyIncomingCallsParams, token: CancellationToken) {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.item, params.item.range.start);
+    protected async onCallHierarchyIncomingCalls(params: CallHierarchyIncomingCallsParams, token: CancellationToken) {
+        const uri = this.convertLspUriStringToUri(params.item.uri);
 
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return null;
         }
 
         return workspace.service.run((program) => {
-            return new CallHierarchyProvider(program, filePath, position, token).getIncomingCalls();
+            return new CallHierarchyProvider(program, uri, params.item.range.start, token).getIncomingCalls();
         }, token);
     }
 
-    protected async onOutgoingCalls(
+    protected async onCallHierarchyOutgoingCalls(
         params: CallHierarchyOutgoingCallsParams,
         token: CancellationToken
     ): Promise<CallHierarchyOutgoingCall[] | null> {
-        const { filePath, position } = this.uriParser.decodeTextDocumentPosition(params.item, params.item.range.start);
+        const uri = this.convertLspUriStringToUri(params.item.uri);
 
-        const workspace = await this.getWorkspaceForFile(filePath);
+        const workspace = await this.getWorkspaceForFile(uri);
         if (workspace.disableLanguageServices) {
             return null;
         }
 
         return workspace.service.run((program) => {
-            return new CallHierarchyProvider(program, filePath, position, token).getOutgoingCalls();
+            return new CallHierarchyProvider(program, uri, params.item.range.start, token).getOutgoingCalls();
         }, token);
     }
 
     protected async onDidOpenTextDocument(params: DidOpenTextDocumentParams, ipythonMode = IPythonMode.None) {
-        const filePath = this.uriParser.decodeTextDocumentUri(params.textDocument.uri);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
 
-        if (!this.fs.addUriMap(params.textDocument.uri, filePath)) {
-            // We do not support opening 1 file with 2 different uri.
-            return;
-        }
-
-        let doc = this.openFileMap.get(filePath);
+        let doc = this.openFileMap.get(uri.key);
         if (doc) {
             // We shouldn't get an open text document request for an already-opened doc.
-            this.console.error(`Received redundant open text document command for ${filePath}`);
-            doc = TextDocument.update(doc, [{ text: params.textDocument.text }], params.textDocument.version);
+            this.console.error(`Received redundant open text document command for ${uri}`);
+            TextDocument.update(doc, [{ text: params.textDocument.text }], params.textDocument.version);
         } else {
-            doc = TextDocument.create(filePath, 'python', params.textDocument.version, params.textDocument.text);
+            doc = TextDocument.create(
+                params.textDocument.uri,
+                'python',
+                params.textDocument.version,
+                params.textDocument.text
+            );
         }
-        this.openFileMap.set(filePath, doc);
+        this.openFileMap.set(uri.key, doc);
 
         // Send this open to all the workspaces that might contain this file.
-        const workspaces = await this.getContainingWorkspacesForFile(filePath);
+        const workspaces = await this.getContainingWorkspacesForFile(uri);
         workspaces.forEach((w) => {
-            w.service.setFileOpened(filePath, params.textDocument.version, params.textDocument.text, ipythonMode);
+            w.service.setFileOpened(uri, params.textDocument.version, params.textDocument.text, ipythonMode);
         });
     }
 
     protected async onDidChangeTextDocument(params: DidChangeTextDocumentParams, ipythonMode = IPythonMode.None) {
         this.recordUserInteractionTime();
 
-        const filePath = this.uriParser.decodeTextDocumentUri(params.textDocument.uri);
-        if (!this.fs.hasUriMapEntry(params.textDocument.uri, filePath)) {
-            // We do not support opening 1 file with 2 different uri.
-            return;
-        }
-
-        let doc = this.openFileMap.get(filePath);
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
+        const doc = this.openFileMap.get(uri.key);
         if (!doc) {
             // We shouldn't get a change text request for a closed doc.
-            this.console.error(`Received change text document command for closed file ${filePath}`);
+            this.console.error(`Received change text document command for closed file ${uri}`);
             return;
         }
 
-        doc = TextDocument.update(doc, params.contentChanges, params.textDocument.version);
-        this.openFileMap.set(filePath, doc);
+        TextDocument.update(doc, params.contentChanges, params.textDocument.version);
         const newContents = doc.getText();
 
         // Send this change to all the workspaces that might contain this file.
-        const workspaces = await this.getContainingWorkspacesForFile(filePath);
+        const workspaces = await this.getContainingWorkspacesForFile(uri);
         workspaces.forEach((w) => {
-            w.service.updateOpenFileContents(filePath, params.textDocument.version, newContents, ipythonMode);
+            w.service.updateOpenFileContents(uri, params.textDocument.version, newContents, ipythonMode);
         });
     }
 
     protected async onDidCloseTextDocument(params: DidCloseTextDocumentParams) {
-        const filePath = this.uriParser.decodeTextDocumentUri(params.textDocument.uri);
-        if (!this.fs.removeUriMap(params.textDocument.uri, filePath)) {
-            // We do not support opening 1 file with 2 different uri.
-            return;
-        }
+        const uri = this.convertLspUriStringToUri(params.textDocument.uri);
 
         // Send this close to all the workspaces that might contain this file.
-        const workspaces = await this.getContainingWorkspacesForFile(filePath);
+        const workspaces = await this.getContainingWorkspacesForFile(uri);
         workspaces.forEach((w) => {
-            w.service.setFileClosed(filePath);
+            w.service.setFileClosed(uri);
         });
 
-        this.openFileMap.delete(filePath);
+        this.openFileMap.delete(uri.key);
     }
 
     protected onDidChangeWatchedFiles(params: DidChangeWatchedFilesParams) {
         params.changes.forEach((change) => {
-            const filePath = this.fs.realCasePath(this.uriParser.decodeTextDocumentUri(change.uri));
+            const filePath = this.fs.realCasePath(this.convertLspUriStringToUri(change.uri));
             const eventType: FileWatcherEventType = change.type === 1 ? 'add' : 'change';
             this.serverOptions.fileWatcherHandler.onFileChange(eventType, filePath);
         });
@@ -1240,13 +1083,21 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
             if (WorkspaceEdit.is(result)) {
                 // Tell client to apply edits.
                 // Do not await; the client isn't expecting a result.
-                this.connection.workspace.applyEdit({ label: `Command '${params.command}'`, edit: result });
+                this.connection.workspace.applyEdit({
+                    label: `Command '${params.command}'`,
+                    edit: result,
+                    metadata: { isRefactoring: this.isRefactoringCommand(params.command) },
+                });
             }
 
             if (CommandResult.is(result)) {
                 // Tell client to apply edits.
                 // Await so that we return after the edit is complete.
-                await this.connection.workspace.applyEdit({ label: result.label, edit: result.edits });
+                await this.connection.workspace.applyEdit({
+                    label: result.label,
+                    edit: result.edits,
+                    metadata: { isRefactoring: this.isRefactoringCommand(params.command) },
+                });
             }
 
             return result;
@@ -1254,7 +1105,7 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
 
         if (this.isLongRunningCommand(params.command)) {
             // Create a progress dialog for long-running commands.
-            const progress = await this._getProgressReporter(reporter, Localizer.CodeAction.executingCommand(), token);
+            const progress = await this.getProgressReporter(reporter, Localizer.CodeAction.executingCommand(), token);
 
             const source = progress.source;
             this._pendingCommandCancellationSource = source;
@@ -1278,6 +1129,7 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
 
         // Stop tracking all open files.
         this.openFileMap.clear();
+        this.serviceProvider.dispose();
 
         return Promise.resolve();
     }
@@ -1285,22 +1137,25 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
     protected convertDiagnostics(fs: FileSystem, fileDiagnostics: FileDiagnostics): PublishDiagnosticsParams[] {
         return [
             {
-                uri: convertPathToUri(fs, fileDiagnostics.filePath),
+                uri: convertUriToLspUriString(fs, fileDiagnostics.fileUri),
                 version: fileDiagnostics.version,
                 diagnostics: this._convertDiagnostics(fs, fileDiagnostics.diagnostics),
             },
         ];
     }
 
+    protected getDiagCode(_diag: AnalyzerDiagnostic, rule: string | undefined): string | undefined {
+        return rule;
+    }
+
     protected onAnalysisCompletedHandler(fs: FileSystem, results: AnalysisResults): void {
         // Send the computed diagnostics to the client.
         results.diagnostics.forEach((fileDiag) => {
-            if (!this.canNavigateToFile(fileDiag.filePath, fs)) {
+            if (!this.canNavigateToFile(fileDiag.fileUri, fs)) {
                 return;
             }
 
-            this._sendDiagnostics(this.convertDiagnostics(fs, fileDiag));
-            this.fs.pendingRequest(fileDiag.filePath, fileDiag.diagnostics.length > 0);
+            this.sendDiagnostics(this.convertDiagnostics(fs, fileDiag));
         });
 
         if (!this._progressReporter.isEnabled(results)) {
@@ -1313,19 +1168,29 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         }
 
         // Update progress.
-        if (results.filesRequiringAnalysis > 0) {
+        const progressMessage = this.getProgressMessage(results);
+        if (progressMessage) {
             this._progressReporter.begin();
-
-            const progressMessage =
-                results.filesRequiringAnalysis === 1
-                    ? Localizer.CodeAction.filesToAnalyzeOne()
-                    : Localizer.CodeAction.filesToAnalyzeCount().format({
-                          count: results.filesRequiringAnalysis,
-                      });
             this._progressReporter.report(progressMessage);
         } else {
             this._progressReporter.end();
         }
+    }
+
+    protected getProgressMessage(results: AnalysisResults): string | undefined {
+        const fileCount = results.requiringAnalysisCount.files;
+
+        if (fileCount === 0) {
+            return undefined;
+        }
+
+        const progressMessage =
+            fileCount === 1
+                ? Localizer.CodeAction.filesToAnalyzeOne()
+                : Localizer.CodeAction.filesToAnalyzeCount().format({
+                      count: fileCount,
+                  });
+        return progressMessage;
     }
 
     protected onWorkspaceCreated(workspace: Workspace) {
@@ -1337,28 +1202,38 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         // Otherwise the initialize completion should cause settings to be updated on all workspaces.
     }
 
+    protected onWorkspaceRemoved(workspace: Workspace) {
+        const documentsWithDiagnosticsList = [...this.documentsWithDiagnostics];
+        const otherWorkspaces = this.workspaceFactory.items().filter((w) => w !== workspace);
+
+        for (const uri of documentsWithDiagnosticsList) {
+            const fileUri = this.convertLspUriStringToUri(uri);
+
+            if (workspace.service.isTracked(fileUri)) {
+                // Do not clean up diagnostics for files tracked by multiple workspaces
+                if (otherWorkspaces.some((w) => w.service.isTracked(fileUri))) {
+                    continue;
+                }
+                this.sendDiagnostics([
+                    {
+                        uri: uri,
+                        diagnostics: [],
+                    },
+                ]);
+            }
+        }
+    }
+
     protected createAnalyzerServiceForWorkspace(
         name: string,
-        _rootPath: string,
-        _uri: string,
+        workspaceRoot: Uri,
         kinds: string[],
         services?: WorkspaceServices
     ): AnalyzerService {
         // 5 seconds default
         const defaultBackOffTime = 5 * 1000;
 
-        // 10 seconds back off for multi workspace.
-        const multiWorkspaceBackOffTime = 10 * 1000;
-
-        const libraryReanalysisTimeProvider =
-            kinds.length === 1 && kinds[0] === WellKnownWorkspaceKinds.Regular
-                ? () =>
-                      this.workspaceFactory.hasMultipleWorkspaces(kinds[0])
-                          ? multiWorkspaceBackOffTime
-                          : defaultBackOffTime
-                : () => defaultBackOffTime;
-
-        return this.createAnalyzerService(name, services, libraryReanalysisTimeProvider);
+        return this.createAnalyzerService(name, workspaceRoot, services, () => defaultBackOffTime);
     }
 
     protected recordUserInteractionTime() {
@@ -1370,84 +1245,27 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         });
     }
 
-    protected getDocumentationUrlForDiagnosticRule(rule: string): string | undefined {
-        // Configuration.md is configured to have a link for every rule name.
-        return `https://github.com/microsoft/pyright/blob/main/docs/configuration.md#${rule}`;
+    protected getDocumentationUrlForDiagnostic(diag: AnalyzerDiagnostic): string | undefined {
+        const rule = diag.getRule();
+        if (rule) {
+            // Configuration.md is configured to have a link for every rule name.
+            return `https://github.com/microsoft/pyright/blob/main/docs/configuration.md#${rule}`;
+        }
+        return undefined;
     }
 
     protected abstract createProgressReporter(): ProgressReporter;
 
-    protected canNavigateToFile(path: string, fs: FileSystem): boolean {
+    protected canNavigateToFile(path: Uri, fs: FileSystem): boolean {
         return canNavigateToFile(fs, path);
     }
 
-    private _setupFileWatcher() {
-        if (!this.client.hasWatchFileCapability) {
-            return;
-        }
-
-        const watchKind = WatchKind.Create | WatchKind.Change | WatchKind.Delete;
-
-        // Set default (config files and all workspace files) first.
-        const watchers: FileSystemWatcher[] = [
-            ...configFileNames.map((fileName) => ({ globPattern: `**/${fileName}`, kind: watchKind })),
-            { globPattern: '**', kind: watchKind },
-        ];
-
-        // Add all python search paths to watch list
-        if (this.client.hasWatchFileRelativePathCapability) {
-            // Dedup search paths from all workspaces.
-            // Get rid of any search path under workspace root since it is already watched by
-            // "**" above.
-            const foldersToWatch = deduplicateFolders(
-                this.workspaceFactory
-                    .getNonDefaultWorkspaces()
-                    .map((w) => w.searchPathsToWatch.filter((p) => !p.startsWith(w.rootPath)))
-            );
-
-            foldersToWatch.forEach((p) => {
-                const globPattern = isFile(this.fs, p, /* treatZipDirectoryAsFile */ true)
-                    ? { baseUri: convertPathToUri(this.fs, getDirectoryPath(p)), pattern: getFileName(p) }
-                    : { baseUri: convertPathToUri(this.fs, p), pattern: '**' };
-
-                watchers.push({ globPattern, kind: watchKind });
-            });
-        }
-
-        // File watcher is pylance wide service. Dispose all existing file watchers and create new ones.
-        this.connection.client.register(DidChangeWatchedFilesNotification.type, { watchers }).then((d) => {
-            if (this._lastFileWatcherRegistration) {
-                this._lastFileWatcherRegistration.dispose();
-            }
-
-            this._lastFileWatcherRegistration = d;
-        });
-    }
-
-    private _sendDiagnostics(params: PublishDiagnosticsParams[]) {
-        for (const param of params) {
-            this.connection.sendDiagnostics(param);
-        }
-    }
-
-    private _getCompatibleMarkupKind(clientSupportedFormats: MarkupKind[] | undefined) {
-        const serverSupportedFormats = [MarkupKind.PlainText, MarkupKind.Markdown];
-
-        for (const format of clientSupportedFormats ?? []) {
-            if (serverSupportedFormats.includes(format)) {
-                return format;
-            }
-        }
-
-        return MarkupKind.PlainText;
-    }
-
-    private async _getProgressReporter(reporter: WorkDoneProgressReporter, title: string, token: CancellationToken) {
+    protected async getProgressReporter(reporter: WorkDoneProgressReporter, title: string, token: CancellationToken) {
         // This is a bit ugly, but we need to determine whether the provided reporter
         // is an actual client-side progress reporter or a dummy (null) progress reporter
         // created by the LSP library. If it's the latter, we'll create a server-initiated
         // progress reporter.
-        if (reporter.constructor !== nullProgressReporter.constructor) {
+        if (!isNullProgressReporter(reporter)) {
             return { reporter: reporter, source: CancelAfter(this.serverOptions.cancellationProvider, token) };
         }
 
@@ -1465,13 +1283,45 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
         };
     }
 
+    protected sendDiagnostics(params: PublishDiagnosticsParams[]) {
+        for (const param of params) {
+            if (param.diagnostics.length === 0) {
+                this.documentsWithDiagnostics.delete(param.uri);
+            } else {
+                this.documentsWithDiagnostics.add(param.uri);
+            }
+            this.connection.sendDiagnostics(param);
+        }
+    }
+
+    protected convertLspUriStringToUri(uri: string) {
+        return Uri.parse(uri, this.serverOptions.serviceProvider);
+    }
+
+    protected addDynamicFeature(feature: DynamicFeature) {
+        this.dynamicFeatures.add(feature);
+    }
+
+    private _getCompatibleMarkupKind(clientSupportedFormats: MarkupKind[] | undefined) {
+        const serverSupportedFormats = [MarkupKind.PlainText, MarkupKind.Markdown];
+
+        for (const format of clientSupportedFormats ?? []) {
+            if (serverSupportedFormats.includes(format)) {
+                return format;
+            }
+        }
+
+        return MarkupKind.PlainText;
+    }
+
     private _convertDiagnostics(fs: FileSystem, diags: AnalyzerDiagnostic[]): Diagnostic[] {
         const convertedDiags: Diagnostic[] = [];
 
         diags.forEach((diag) => {
             const severity = convertCategoryToSeverity(diag.category);
             const rule = diag.getRule();
-            const vsDiag = Diagnostic.create(diag.range, diag.message, severity, rule, this.serverOptions.productName);
+            const code = this.getDiagCode(diag, rule);
+            const vsDiag = Diagnostic.create(diag.range, diag.message, severity, code, this.serverOptions.productName);
 
             if (
                 diag.category === DiagnosticCategory.UnusedCode ||
@@ -1493,34 +1343,12 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
                     return;
                 }
             } else if (diag.category === DiagnosticCategory.TaskItem) {
-                vsDiag.tags = [VSDiagnosticTag.TaskItem as DiagnosticTag];
-
-                // Map the task item priority to a value VS will understand
-                // and store it in the diagnostic.
-
-                // The Diagnostic type is defined in a protocol that we can't change,
-                // so we just dynamically create the vsDiag._vs_diagnosticRank property at runtime,
-                // which is what VS is looking for.
-                switch (diag.priority as TaskListPriority) {
-                    case TaskListPriority.High:
-                        (vsDiag as any)._vs_diagnosticRank = VSDiagnosticRank.High;
-                        break;
-                    case TaskListPriority.Normal:
-                        (vsDiag as any)._vs_diagnosticRank = VSDiagnosticRank.Default;
-                        break;
-                    case TaskListPriority.Low:
-                        (vsDiag as any)._vs_diagnosticRank = VSDiagnosticRank.Low;
-                        break;
-                }
-
-                // if the client doesn't support "task item" tags, don't report.
-                if (!this.client.supportsTaskItemDiagnosticTag) {
-                    return;
-                }
+                // TaskItem is not supported.
+                return;
             }
 
             if (rule) {
-                const ruleDocUrl = this.getDocumentationUrlForDiagnosticRule(rule);
+                const ruleDocUrl = this.getDocumentationUrlForDiagnostic(diag);
                 if (ruleDocUrl) {
                     vsDiag.codeDescription = {
                         href: ruleDocUrl,
@@ -1531,10 +1359,10 @@ export abstract class LanguageServerBase implements LanguageServerInterface {
             const relatedInfo = diag.getRelatedInfo();
             if (relatedInfo.length > 0) {
                 vsDiag.relatedInformation = relatedInfo
-                    .filter((info) => this.canNavigateToFile(info.filePath, fs))
+                    .filter((info) => this.canNavigateToFile(info.uri, fs))
                     .map((info) =>
                         DiagnosticRelatedInformation.create(
-                            Location.create(convertPathToUri(fs, info.filePath), info.range),
+                            Location.create(convertUriToLspUriString(fs, info.uri), info.range),
                             info.message
                         )
                     );
